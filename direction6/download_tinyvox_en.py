@@ -5,10 +5,11 @@ Download the English slice of TinyVox plus everything Direction 6 needs.
 What it fetches
   1. TinyVox metadata (metadata/train/val/test.csv) -- public, ~35 MB zip.
   2. The English rows of metadata.csv -> tinyvox_en/metadata_en.csv
-  3. PhonBank "Phon and CHAT data" zips for every corpus that contributes English
-     utterances (12 corpora, small). These contain the .cha transcripts with the
-     %mod (target) tier that TinyVox's own metadata does NOT carry, and usually the
-     Phon .xml sessions with the explicit target<->actual alignment.
+  3. The 1,407 English .cha transcripts TinyVox was built from, fetched one by one
+     from media.talkbank.org at the exact paths recorded in metadata.csv (this is
+     where the repo's scraper got them). They carry the %mod (target) tier that
+     TinyVox's own metadata does NOT keep. If a direct fetch fails, the script falls
+     back to that corpus's "Phon and CHAT data" zip (not every corpus has one).
   4. The TinyVox one-item audio (561,312 wavs, all languages) -- then keeps only the
      English wavs. Two modes:
        --audio full    : download TinyVox.zip once (resumable), extract English members.
@@ -98,29 +99,69 @@ def english_subset(meta_csv, out):
     return en, summary
 
 
-def fetch_transcripts(summary, out, cookie):
+MEDIA_FILE = "https://media.talkbank.org/phon/{group}/{corpus}/{rel}?f=save"
+
+
+def _looks_like_chat(b):
+    head = b[:200].decode("utf-8", "ignore").lstrip("\ufeff")
+    return head.startswith("@UTF8") or head.startswith("@Begin")
+
+
+def fetch_transcripts(en, summary, out, cookie):
+    """Download the exact .cha files TinyVox was built from, one by one, from the
+    media server (the same place the repo's scraper got them). Falls back to the
+    corpus 'Phon and CHAT data' zip only if a direct fetch fails."""
     tdir = out / "transcripts"
-    for _, row in summary.iterrows():
-        dest = tdir / row.group / f"{row.corpus}.zip"
-        if dest.exists() and dest.stat().st_size > 10_000:
-            print(f"[cha] have {dest}")
+    s = requests.Session()
+    s.cookies.set("talkbank", cookie)
+    files = en[["group", "corpus", "cha_relpath"]].drop_duplicates()
+    ok, failed = 0, []
+    for i, row in enumerate(files.itertuples(index=False), 1):
+        dest = tdir / row.group / row.corpus / row.cha_relpath
+        if dest.exists() and dest.stat().st_size > 0:
+            ok += 1
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        url = DATA_ZIP.format(group=row.group, corpus=row.corpus)
-        print(f"[cha] {url}")
-        with requests.get(url, cookies={"talkbank": cookie}, stream=True, timeout=600) as r:
-            r.raise_for_status()
-            ctype = r.headers.get("Content-Type", "")
-            if "html" in ctype:
-                sys.exit(f"Got HTML instead of a zip for {url}: not logged in, or no access to this corpus.")
-            with open(dest, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
-                    f.write(chunk)
-        # unzip next to it
-        with zipfile.ZipFile(dest) as z:
-            z.extractall(dest.parent)
-        n_cha = len(list((dest.parent / row.corpus).rglob("*.cha"))) if (dest.parent / row.corpus).exists() else "?"
-        print(f"[cha]   ok ({dest.stat().st_size/1e6:.1f} MB, {n_cha} .cha files)")
+        url = MEDIA_FILE.format(group=row.group, corpus=row.corpus, rel=row.cha_relpath)
+        try:
+            r = s.get(url, timeout=120)
+            body = r.content
+            if r.status_code != 200 or "html" in r.headers.get("Content-Type", "") or not _looks_like_chat(body):
+                # some servers keep spaces in paths; retry with encoded spaces
+                r = s.get(url.replace(" ", "%20"), timeout=120)
+                body = r.content
+            if r.status_code == 200 and _looks_like_chat(body):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(body)
+                ok += 1
+            else:
+                failed.append((row.group, row.corpus, row.cha_relpath, r.status_code))
+        except requests.RequestException as e:
+            failed.append((row.group, row.corpus, row.cha_relpath, str(e)))
+        if i % 100 == 0:
+            print(f"[cha] {i}/{len(files)} ({ok} ok, {len(failed)} failed)")
+    print(f"[cha] {ok}/{len(files)} .cha files present; {len(failed)} failed")
+    if failed:
+        (out / "failed_cha.txt").write_text("\n".join("\t".join(map(str, f)) for f in failed))
+        print("[cha]   failures listed in failed_cha.txt; trying corpus zips for those corpora")
+        for _, row in summary.iterrows():
+            if not any(f[0] == row.group and f[1] == row.corpus for f in failed):
+                continue
+            dest = tdir / row.group / f"{row.corpus}.zip"
+            url = DATA_ZIP.format(group=row.group, corpus=row.corpus)
+            try:
+                with s.get(url, stream=True, timeout=600) as r:
+                    if r.status_code != 200 or "html" in r.headers.get("Content-Type", ""):
+                        print(f"[cha]   no zip for {row.group}/{row.corpus} (HTTP {r.status_code})")
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with open(dest, "wb") as f:
+                        for chunk in r.iter_content(1 << 20):
+                            f.write(chunk)
+                with zipfile.ZipFile(dest) as z:
+                    z.extractall(dest.parent)
+                print(f"[cha]   zip ok: {dest}")
+            except Exception as e:
+                print(f"[cha]   zip failed for {row.group}/{row.corpus}: {e}")
 
 
 def wanted_audio_names(en):
@@ -201,7 +242,7 @@ def main():
         print("[auth] logged in")
 
     if not args.no_transcripts:
-        fetch_transcripts(summary, args.out, cookie)
+        fetch_transcripts(en, summary, args.out, cookie)
 
     if args.audio == "full":
         audio_full(args.out, en, cookie)
