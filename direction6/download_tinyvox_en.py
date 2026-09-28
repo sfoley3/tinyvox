@@ -118,6 +118,28 @@ def discover_corpus_locations(session):
     return loc
 
 
+def extract_corpus_zip(zip_path, corpus):
+    """Unpack transcripts/<group>/<corpus>.zip into transcripts/<group>/<corpus>/.
+    PhonBank zips have no top-level corpus folder, so extracting into the group
+    folder merges corpora; always give each its own directory. If the zip does
+    carry a single top-level folder named after the corpus, flatten it."""
+    import shutil
+    target = zip_path.with_suffix("")
+    if target.exists() and any(target.rglob("*.cha")):
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(target)
+    inner = target / corpus
+    if inner.is_dir() and all(p == inner for p in target.iterdir()):
+        for p in inner.iterdir():
+            shutil.move(str(p), str(target / p.name))
+        inner.rmdir()
+    n_cha = len(list(target.rglob("*.cha")))
+    n_xml = len(list(target.rglob("*.xml")))
+    print(f"[cha]   {target}: {n_cha} .cha, {n_xml} .xml")
+
+
 def fetch_transcripts(en, summary, out, cookie):
     """Download each corpus's 'Phon and CHAT data' zip (talkbank.org/data/phon/<group>/<corpus>?f=zip)
     and unpack it under transcripts/<group>/<corpus>/. Corpora are located by name on the
@@ -135,6 +157,7 @@ def fetch_transcripts(en, summary, out, cookie):
         dest = tdir / group / f"{row.corpus}.zip"
         if dest.exists() and dest.stat().st_size > 10_000:
             print(f"[cha] have {dest}")
+            extract_corpus_zip(dest, row.corpus)
             continue
         url = DATA_ZIP.format(group=group, corpus=row.corpus)
         r = s.get(url, stream=True, timeout=900)
@@ -146,10 +169,8 @@ def fetch_transcripts(en, summary, out, cookie):
         with open(dest, "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
-        with zipfile.ZipFile(dest) as z:
-            z.extractall(dest.parent)
-        n_cha = len(list(dest.parent.rglob("*.cha")))
-        print(f"[cha]   ok {url} -> {dest.stat().st_size/1e6:.1f} MB; {n_cha} .cha now under {dest.parent}")
+        extract_corpus_zip(dest, row.corpus)
+        print(f"[cha]   ok {url} -> {dest.stat().st_size/1e6:.1f} MB")
     if not_found:
         (out / "failed_cha.txt").write_text("\n".join("\t".join(map(str, f)) for f in not_found))
         names = ", ".join(f[1] for f in not_found)
