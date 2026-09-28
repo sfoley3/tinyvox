@@ -43,21 +43,20 @@ from chat_toolkit.cha import Utterance  # noqa: E402
 meta = pd.read_csv(args.root / "metadata_en.csv")
 meta["cha_stem"] = meta.cha_relpath.str.replace(r"\.cha$", "", regex=True)
 
-# ---- index every .cha we downloaded, keyed by (group, corpus, relpath-without-ext) ----
+# ---- index every .cha we downloaded, keyed by (corpus, relpath-without-ext) ----
+# The group folder is ignored on purpose: PhonBank may have moved a corpus to a
+# different group since TinyVox recorded its paths.
 cha_index = {}
 tdir = args.root / "transcripts"
-for group_dir in tdir.iterdir():
-    if not group_dir.is_dir():
-        continue
-    for corpus_dir in group_dir.iterdir():
-        if not corpus_dir.is_dir():
-            continue
-        for cha in corpus_dir.rglob("*.cha"):
-            rel = cha.relative_to(corpus_dir).with_suffix("")
-            cha_index[(group_dir.name, corpus_dir.name, str(rel))] = cha
-            # also index by bare stem, in case the zip layout differs from the scraper's
-            cha_index.setdefault((group_dir.name, corpus_dir.name, "stem:" + cha.stem), cha)
-print(f"indexed {len([k for k in cha_index if not k[2].startswith('stem:')])} .cha files")
+for cha in tdir.rglob("*.cha"):
+    parts = cha.relative_to(tdir).parts  # e.g. ('Eng-NA', 'Davis', 'Martin', '011000.cha')
+    for i, comp in enumerate(parts[:-1]):
+        if comp in set(meta.corpus):
+            rel = str(Path(*parts[i + 1:]).with_suffix(""))
+            cha_index.setdefault((comp, rel), cha)
+            cha_index.setdefault((comp, "stem:" + cha.stem), cha)
+            break
+print(f"indexed {len([k for k in cha_index if not k[1].startswith('stem:')])} .cha files")
 
 TIERS = ["pho", "xpho", "mod", "xmod"]
 
@@ -76,7 +75,7 @@ missing_cha = set()
 parsed_cache = {}
 
 for (group, corpus, stem), g in meta.groupby(["group", "corpus", "cha_stem"]):
-    cha = cha_index.get((group, corpus, stem)) or cha_index.get((group, corpus, "stem:" + Path(stem).name))
+    cha = cha_index.get((corpus, stem)) or cha_index.get((corpus, "stem:" + Path(stem).name))
     if cha is None:
         missing_cha.add(f"{group}/{corpus}/{stem}.cha")
         for _, r in g.iterrows():

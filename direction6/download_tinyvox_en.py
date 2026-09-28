@@ -5,11 +5,11 @@ Download the English slice of TinyVox plus everything Direction 6 needs.
 What it fetches
   1. TinyVox metadata (metadata/train/val/test.csv) -- public, ~35 MB zip.
   2. The English rows of metadata.csv -> tinyvox_en/metadata_en.csv
-  3. The 1,407 English .cha transcripts TinyVox was built from, fetched one by one
-     from media.talkbank.org at the exact paths recorded in metadata.csv (this is
-     where the repo's scraper got them). They carry the %mod (target) tier that
-     TinyVox's own metadata does NOT keep. If a direct fetch fails, the script falls
-     back to that corpus's "Phon and CHAT data" zip (not every corpus has one).
+  3. Each English corpus's "Phon and CHAT data" zip from
+     talkbank.org/data/phon/<group>/<corpus>?f=zip. The media server holds audio only;
+     the .cha transcripts (with the %mod target tier TinyVox's metadata does NOT keep)
+     live in these zips. Corpora are located by name on the current PhonBank tree,
+     since some have moved since TinyVox was built.
   4. The TinyVox one-item audio (561,312 wavs, all languages) -- then keeps only the
      English wavs. Two modes:
        --audio full    : download TinyVox.zip once (resumable), extract English members.
@@ -99,69 +99,64 @@ def english_subset(meta_csv, out):
     return en, summary
 
 
-MEDIA_FILE = "https://media.talkbank.org/phon/{group}/{corpus}/{rel}?f=save"
+MEDIA_ROOT = "https://media.talkbank.org/phon/"
 
 
-def _looks_like_chat(b):
-    head = b[:200].decode("utf-8", "ignore").lstrip("\ufeff")
-    return head.startswith("@UTF8") or head.startswith("@Begin")
+def discover_corpus_locations(session):
+    """PhonBank has moved/renamed corpora since TinyVox was built, so map every
+    corpus name that exists today to its current group by reading the media
+    server's directory listings (group level only, two requests deep)."""
+    import re
+    loc = {}
+    top = session.get(MEDIA_ROOT, timeout=120).text
+    groups = sorted({m.rstrip("/").split("/")[-1] for m in re.findall(r'href="[^"]*?/phon/+([^"?/]+)/?"', top)})
+    for g in groups:
+        html = session.get(f"{MEDIA_ROOT}{g}/", timeout=120).text
+        for m in re.findall(r'href="[^"]*?/phon/+' + re.escape(g) + r'/+([^"?/]+)/?"', html):
+            if "." not in m:
+                loc[m] = g
+    return loc
 
 
 def fetch_transcripts(en, summary, out, cookie):
-    """Download the exact .cha files TinyVox was built from, one by one, from the
-    media server (the same place the repo's scraper got them). Falls back to the
-    corpus 'Phon and CHAT data' zip only if a direct fetch fails."""
+    """Download each corpus's 'Phon and CHAT data' zip (talkbank.org/data/phon/<group>/<corpus>?f=zip)
+    and unpack it under transcripts/<group>/<corpus>/. Corpora are located by name on the
+    current PhonBank tree, because the group recorded in TinyVox's metadata may be stale."""
     tdir = out / "transcripts"
     s = requests.Session()
     s.cookies.set("talkbank", cookie)
-    files = en[["group", "corpus", "cha_relpath"]].drop_duplicates()
-    ok, failed = 0, []
-    for i, row in enumerate(files.itertuples(index=False), 1):
-        dest = tdir / row.group / row.corpus / row.cha_relpath
-        if dest.exists() and dest.stat().st_size > 0:
-            ok += 1
+    loc = discover_corpus_locations(s)
+    print(f"[cha] PhonBank currently lists {len(loc)} corpora across {len(set(loc.values()))} groups")
+    not_found = []
+    for _, row in summary.iterrows():
+        group = loc.get(row.corpus, row.group)
+        if row.corpus not in loc:
+            print(f"[cha] {row.group}/{row.corpus}: not in the current PhonBank tree; trying old path")
+        dest = tdir / group / f"{row.corpus}.zip"
+        if dest.exists() and dest.stat().st_size > 10_000:
+            print(f"[cha] have {dest}")
             continue
-        url = MEDIA_FILE.format(group=row.group, corpus=row.corpus, rel=row.cha_relpath)
-        try:
-            r = s.get(url, timeout=120)
-            body = r.content
-            if r.status_code != 200 or "html" in r.headers.get("Content-Type", "") or not _looks_like_chat(body):
-                # some servers keep spaces in paths; retry with encoded spaces
-                r = s.get(url.replace(" ", "%20"), timeout=120)
-                body = r.content
-            if r.status_code == 200 and _looks_like_chat(body):
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(body)
-                ok += 1
-            else:
-                failed.append((row.group, row.corpus, row.cha_relpath, r.status_code))
-        except requests.RequestException as e:
-            failed.append((row.group, row.corpus, row.cha_relpath, str(e)))
-        if i % 100 == 0:
-            print(f"[cha] {i}/{len(files)} ({ok} ok, {len(failed)} failed)")
-    print(f"[cha] {ok}/{len(files)} .cha files present; {len(failed)} failed")
-    if failed:
-        (out / "failed_cha.txt").write_text("\n".join("\t".join(map(str, f)) for f in failed))
-        print("[cha]   failures listed in failed_cha.txt; trying corpus zips for those corpora")
-        for _, row in summary.iterrows():
-            if not any(f[0] == row.group and f[1] == row.corpus for f in failed):
-                continue
-            dest = tdir / row.group / f"{row.corpus}.zip"
-            url = DATA_ZIP.format(group=row.group, corpus=row.corpus)
-            try:
-                with s.get(url, stream=True, timeout=600) as r:
-                    if r.status_code != 200 or "html" in r.headers.get("Content-Type", ""):
-                        print(f"[cha]   no zip for {row.group}/{row.corpus} (HTTP {r.status_code})")
-                        continue
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    with open(dest, "wb") as f:
-                        for chunk in r.iter_content(1 << 20):
-                            f.write(chunk)
-                with zipfile.ZipFile(dest) as z:
-                    z.extractall(dest.parent)
-                print(f"[cha]   zip ok: {dest}")
-            except Exception as e:
-                print(f"[cha]   zip failed for {row.group}/{row.corpus}: {e}")
+        url = DATA_ZIP.format(group=group, corpus=row.corpus)
+        r = s.get(url, stream=True, timeout=900)
+        if r.status_code != 200 or "zip" not in r.headers.get("Content-Type", ""):
+            not_found.append((row.group, row.corpus, group, r.status_code))
+            print(f"[cha]   FAILED {url} (HTTP {r.status_code}, {r.headers.get('Content-Type')})")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
+        with zipfile.ZipFile(dest) as z:
+            z.extractall(dest.parent)
+        n_cha = len(list(dest.parent.rglob("*.cha")))
+        print(f"[cha]   ok {url} -> {dest.stat().st_size/1e6:.1f} MB; {n_cha} .cha now under {dest.parent}")
+    if not_found:
+        (out / "failed_cha.txt").write_text("\n".join("\t".join(map(str, f)) for f in not_found))
+        names = ", ".join(f[1] for f in not_found)
+        print(f"[cha] could not locate: {names}. These corpora were probably renamed or merged on PhonBank;")
+        print("[cha] see failed_cha.txt, and compare the corpus list printed above with the TinyVox names.")
+        candidates = sorted(loc)
+        print("[cha] corpora available now: " + ", ".join(f"{c} ({loc[c]})" for c in candidates))
 
 
 def wanted_audio_names(en):
