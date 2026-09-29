@@ -1,20 +1,19 @@
 # TinyVox-EN for Direction 6 — getting started
 
-Two scripts. Run them from anywhere; they only need the `tinyvox` clone for its `chat_toolkit` parser.
+Two scripts, run from the repo root (they import `chat_toolkit` from the parent folder).
 
 ```bash
 pip install requests pandas remotezip        # remotezip only for --audio remote
 export TALKBANK_EMAIL=you@usc.edu TALKBANK_PASSWORD='...'
 
 # 1) metadata (public) + English subset + the 12 PhonBank transcript zips (auth)
-python download_tinyvox_en.py --out /scratch/tinyvox_en --audio skip
+python direction6/download_tinyvox_en.py --out /scratch/tinyvox_en --audio skip
 
 # 2) recover the %mod target tier and join it to every TinyVox-EN utterance
-python build_tinyvox_en_targets.py --root /scratch/tinyvox_en --tinyvox-repo ~/tinyvox
+python direction6/build_tinyvox_en_targets.py --root /scratch/tinyvox_en
 
-# 3) audio: try range requests first (English members only), fall back to the full zip
-python download_tinyvox_en.py --out /scratch/tinyvox_en --audio remote
-python download_tinyvox_en.py --out /scratch/tinyvox_en --audio full     # resumable curl, then extracts EN wavs
+# 3) audio: the full 34.7 GB zip (resumes across the server's ~10 min cutoffs), then English-only extraction
+python direction6/download_tinyvox_en.py --out /scratch/tinyvox_en --audio full     # resumable curl, then extracts EN wavs
 ```
 
 ## What the English slice is (from the public metadata, checked 2026-09-27)
@@ -50,7 +49,23 @@ So the 2–6 y window that matters most for the norms comes mostly from Providen
 
 ## Audio size
 
-The TinyVox audio zip is all five languages (561,312 wavs, ~388 h at 16 kHz mono ≈ 45 GB uncompressed; the server does not report the zip size). The English share is ~24 GB. `--audio remote` pulls only English members if the media server honours HTTP Range requests; if it errors, use `--audio full` (resumable) and the script extracts only the English wavs from the local zip. The 238 GB "original" session audio is not needed for Direction 6 unless you want BabAR-style 20 s context windows.
+The TinyVox audio zip is all five languages (561,312 wavs, ~388 h at 16 kHz mono ≈ 45 GB uncompressed; the server does not report the zip size). The English share is ~24 GB. The media server does not honour HTTP Range requests (checked 2026-09-28), so use `--audio full` (resumable) and the script extracts only the English wavs from the local zip. The 238 GB "original" session audio is not needed for Direction 6 unless you want BabAR-style 20 s context windows.
+
+## If the audio download keeps getting cut off
+
+`media.talkbank.org` closes transfers after ~10 minutes and does not support byte ranges, so
+the 37.3 GB zip cannot be resumed. Keep the partial file: zip members are sequential, so every
+complete member in it can be recovered without the central directory:
+
+```bash
+python direction6/extract_from_partial_zip.py --zip tinyvox_en/TinyVox.zip \
+    --manifest tinyvox_en/audio_manifest_en.csv --out tinyvox_en/audio --list-only   # scan
+python direction6/extract_from_partial_zip.py --zip tinyvox_en/TinyVox.zip \
+    --manifest tinyvox_en/audio_manifest_en.csv --out tinyvox_en/audio               # extract
+```
+
+If English members are past the cut, retry the full download from a faster host (CARC transfer
+node) so it finishes inside the server's window.
 
 ## Next after this
 
