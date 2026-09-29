@@ -19,7 +19,7 @@ Outputs
   <root>/coverage_report.txt per-corpus coverage of %mod and word-count agreement
 
 Usage
-  python direction6/build_tinyvox_en_targets.py --root /path/to/tinyvox_en
+  python build_tinyvox_en_targets.py --root /path/to/tinyvox_en --tinyvox-repo /path/to/tinyvox
 """
 import argparse
 import re
@@ -31,8 +31,7 @@ import pandas as pd
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--root", required=True, type=Path)
-ap.add_argument("--tinyvox-repo", type=Path, default=Path(__file__).resolve().parent.parent,
-                help="repo root (for chat_toolkit); defaults to the parent of this folder")
+ap.add_argument("--tinyvox-repo", required=True, type=Path, help="clone of sfoley3/tinyvox (for chat_toolkit)")
 ap.add_argument("--tolerance-ms", type=int, default=50, help="onset/offset slack when matching utterances")
 args = ap.parse_args()
 
@@ -43,20 +42,21 @@ from chat_toolkit.cha import Utterance  # noqa: E402
 meta = pd.read_csv(args.root / "metadata_en.csv")
 meta["cha_stem"] = meta.cha_relpath.str.replace(r"\.cha$", "", regex=True)
 
-# ---- index every .cha we downloaded, keyed by (corpus, relpath-without-ext) ----
-# The group folder is ignored on purpose: PhonBank may have moved a corpus to a
-# different group since TinyVox recorded its paths.
+# ---- index every .cha we downloaded, keyed by (group, corpus, relpath-without-ext) ----
 cha_index = {}
 tdir = args.root / "transcripts"
-for cha in tdir.rglob("*.cha"):
-    parts = cha.relative_to(tdir).parts  # e.g. ('Eng-NA', 'Davis', 'Martin', '011000.cha')
-    for i, comp in enumerate(parts[:-1]):
-        if comp in set(meta.corpus):
-            rel = str(Path(*parts[i + 1:]).with_suffix(""))
-            cha_index.setdefault((comp, rel), cha)
-            cha_index.setdefault((comp, "stem:" + cha.stem), cha)
-            break
-print(f"indexed {len([k for k in cha_index if not k[1].startswith('stem:')])} .cha files")
+for group_dir in tdir.iterdir():
+    if not group_dir.is_dir():
+        continue
+    for corpus_dir in group_dir.iterdir():
+        if not corpus_dir.is_dir():
+            continue
+        for cha in corpus_dir.rglob("*.cha"):
+            rel = cha.relative_to(corpus_dir).with_suffix("")
+            cha_index[(group_dir.name, corpus_dir.name, str(rel))] = cha
+            # also index by bare stem, in case the zip layout differs from the scraper's
+            cha_index.setdefault((group_dir.name, corpus_dir.name, "stem:" + cha.stem), cha)
+print(f"indexed {len([k for k in cha_index if not k[2].startswith('stem:')])} .cha files")
 
 TIERS = ["pho", "xpho", "mod", "xmod"]
 
@@ -75,7 +75,7 @@ missing_cha = set()
 parsed_cache = {}
 
 for (group, corpus, stem), g in meta.groupby(["group", "corpus", "cha_stem"]):
-    cha = cha_index.get((corpus, stem)) or cha_index.get((corpus, "stem:" + Path(stem).name))
+    cha = cha_index.get((group, corpus, stem)) or cha_index.get((group, corpus, "stem:" + Path(stem).name))
     if cha is None:
         missing_cha.add(f"{group}/{corpus}/{stem}.cha")
         for _, r in g.iterrows():

@@ -1,20 +1,20 @@
 # TinyVox-EN for Direction 6 — getting started
 
-Two scripts, run from the repo root (they import `chat_toolkit` from the parent folder).
+Two scripts. Run them from anywhere; they only need the `tinyvox` clone for its `chat_toolkit` parser.
 
 ```bash
 pip install requests pandas remotezip        # remotezip only for --audio remote
 export TALKBANK_EMAIL=you@usc.edu TALKBANK_PASSWORD='...'
 
 # 1) metadata (public) + English subset + the 12 PhonBank transcript zips (auth)
-python direction6/download_tinyvox_en.py --out /scratch/tinyvox_en --audio skip
+python download_tinyvox_en.py --out /scratch/tinyvox_en --audio skip
 
 # 2) recover the %mod target tier and join it to every TinyVox-EN utterance
-python direction6/build_tinyvox_en_targets.py --root /scratch/tinyvox_en
+python build_tinyvox_en_targets.py --root /scratch/tinyvox_en --tinyvox-repo ~/tinyvox
 
 # 3) audio: try range requests first (English members only), fall back to the full zip
-python direction6/download_tinyvox_en.py --out /scratch/tinyvox_en --audio remote
-python direction6/download_tinyvox_en.py --out /scratch/tinyvox_en --audio full     # resumable curl, then extracts EN wavs
+python download_tinyvox_en.py --out /scratch/tinyvox_en --audio remote
+python download_tinyvox_en.py --out /scratch/tinyvox_en --audio full     # resumable curl, then extracts EN wavs
 ```
 
 ## What the English slice is (from the public metadata, checked 2026-09-27)
